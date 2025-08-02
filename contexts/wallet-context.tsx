@@ -1,27 +1,27 @@
 "use client"
 
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
-import { ethers } from "ethers"
 import { useToast } from "@/hooks/use-toast"
 
 interface WalletContextType {
-  account: string
+  account: string | null
   balance: string
+  chainId: number | null
   isConnected: boolean
-  provider: ethers.BrowserProvider | null
-  signer: ethers.JsonRpcSigner | null
-  chainId: number
+  isConnecting: boolean
+  signer: any
+  provider: any
   connectWallet: () => Promise<void>
   disconnectWallet: () => void
   switchNetwork: (chainId: number) => Promise<void>
-  getBalance: () => Promise<void>
+  refreshBalance: () => Promise<void>
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined)
 
 export function useWallet() {
   const context = useContext(WalletContext)
-  if (!context) {
+  if (context === undefined) {
     throw new Error("useWallet must be used within a WalletProvider")
   }
   return context
@@ -32,13 +32,21 @@ interface WalletProviderProps {
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
+  const [account, setAccount] = useState<string | null>(null)
+  const [balance, setBalance] = useState("0.0")
+  const [chainId, setChainId] = useState<number | null>(null)
+  const [isConnected, setIsConnected] = useState(false)
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [provider, setProvider] = useState<any>(null)
+  const [signer, setSigner] = useState<any>(null)
   const { toast } = useToast()
-  const [account, setAccount] = useState<string>("")
-  const [balance, setBalance] = useState<string>("0")
-  const [isConnected, setIsConnected] = useState<boolean>(false)
-  const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null)
-  const [signer, setSigner] = useState<ethers.JsonRpcSigner | null>(null)
-  const [chainId, setChainId] = useState<number>(1)
+
+  const networks = {
+    1: { name: "Ethereum Mainnet", rpcUrl: "https://mainnet.infura.io/v3/", currency: "ETH" },
+    5: { name: "Goerli Testnet", rpcUrl: "https://goerli.infura.io/v3/", currency: "ETH" },
+    137: { name: "Polygon Mainnet", rpcUrl: "https://polygon-rpc.com/", currency: "MATIC" },
+    80001: { name: "Mumbai Testnet", rpcUrl: "https://rpc-mumbai.maticvigil.com/", currency: "MATIC" },
+  }
 
   useEffect(() => {
     checkConnection()
@@ -50,7 +58,11 @@ export function WalletProvider({ children }: WalletProviderProps) {
       try {
         const accounts = await window.ethereum.request({ method: "eth_accounts" })
         if (accounts.length > 0) {
-          await connectWallet()
+          setAccount(accounts[0])
+          setIsConnected(true)
+          await getChainId()
+          await getBalance(accounts[0])
+          setupProvider()
         }
       } catch (error) {
         console.error("Error checking connection:", error)
@@ -62,6 +74,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     if (typeof window !== "undefined" && window.ethereum) {
       window.ethereum.on("accountsChanged", handleAccountsChanged)
       window.ethereum.on("chainChanged", handleChainChanged)
+      window.ethereum.on("disconnect", handleDisconnect)
     }
   }
 
@@ -70,54 +83,121 @@ export function WalletProvider({ children }: WalletProviderProps) {
       disconnectWallet()
     } else {
       setAccount(accounts[0])
-      getBalance()
+      getBalance(accounts[0])
     }
   }
 
   const handleChainChanged = (chainId: string) => {
     setChainId(Number.parseInt(chainId, 16))
-    window.location.reload()
+    if (account) {
+      getBalance(account)
+    }
+  }
+
+  const handleDisconnect = () => {
+    disconnectWallet()
+  }
+
+  const setupProvider = () => {
+    if (typeof window !== "undefined" && window.ethereum) {
+      // In a real app, you'd use ethers.js or web3.js here
+      setProvider(window.ethereum)
+      setSigner(window.ethereum)
+    }
   }
 
   const connectWallet = async () => {
-    try {
-      if (!window.ethereum) {
-        toast({ title: "Error", description: "Please install MetaMask or another Web3 wallet", variant: "destructive" })
-        return
-      }
+    if (typeof window === "undefined" || !window.ethereum) {
+      toast({
+        title: "MetaMask Not Found",
+        description: "Please install MetaMask to connect your wallet",
+        variant: "destructive",
+      })
+      return
+    }
 
+    setIsConnecting(true)
+
+    try {
       const accounts = await window.ethereum.request({
         method: "eth_requestAccounts",
       })
 
-      const provider = new ethers.BrowserProvider(window.ethereum)
-      const signer = await provider.getSigner()
-      const network = await provider.getNetwork()
+      if (accounts.length > 0) {
+        setAccount(accounts[0])
+        setIsConnected(true)
+        await getChainId()
+        await getBalance(accounts[0])
+        setupProvider()
 
-      setAccount(accounts[0])
-      setProvider(provider)
-      setSigner(signer)
-      setChainId(Number(network.chainId))
-      setIsConnected(true)
-
-      await getBalance(accounts[0], provider)
-      toast({ title: "Success", description: "Wallet connected successfully!" })
+        toast({
+          title: "Wallet Connected",
+          description: `Connected to ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`,
+        })
+      }
     } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to connect wallet", variant: "destructive" })
+      console.error("Error connecting wallet:", error)
+      toast({
+        title: "Connection Failed",
+        description: error.message || "Failed to connect wallet",
+        variant: "destructive",
+      })
+    } finally {
+      setIsConnecting(false)
     }
   }
 
   const disconnectWallet = () => {
-    setAccount("")
-    setBalance("0")
+    setAccount(null)
+    setBalance("0.0")
+    setChainId(null)
     setIsConnected(false)
     setProvider(null)
     setSigner(null)
-    setChainId(1)
-    toast({ title: "Info", description: "Wallet disconnected" })
+
+    toast({
+      title: "Wallet Disconnected",
+      description: "Your wallet has been disconnected",
+    })
+  }
+
+  const getChainId = async () => {
+    try {
+      const chainId = await window.ethereum.request({ method: "eth_chainId" })
+      setChainId(Number.parseInt(chainId, 16))
+    } catch (error) {
+      console.error("Error getting chain ID:", error)
+    }
+  }
+
+  const getBalance = async (address: string) => {
+    try {
+      const balance = await window.ethereum.request({
+        method: "eth_getBalance",
+        params: [address, "latest"],
+      })
+      // Convert from wei to ether (simplified)
+      const balanceInEther = (Number.parseInt(balance, 16) / Math.pow(10, 18)).toFixed(4)
+      setBalance(balanceInEther)
+    } catch (error) {
+      console.error("Error getting balance:", error)
+      setBalance("0.0")
+    }
+  }
+
+  const refreshBalance = async () => {
+    if (account) {
+      await getBalance(account)
+      toast({
+        title: "Balance Refreshed",
+        description: "Your wallet balance has been updated",
+      })
+    }
   }
 
   const switchNetwork = async (targetChainId: number) => {
+    if (!window.ethereum) return
+
     try {
       await window.ethereum.request({
         method: "wallet_switchEthereumChain",
@@ -125,43 +205,58 @@ export function WalletProvider({ children }: WalletProviderProps) {
       })
     } catch (error: any) {
       if (error.code === 4902) {
-        toast({ title: "Error", description: "Please add this network to your wallet first", variant: "destructive" })
+        // Network not added to MetaMask
+        const network = networks[targetChainId as keyof typeof networks]
+        if (network) {
+          try {
+            await window.ethereum.request({
+              method: "wallet_addEthereumChain",
+              params: [
+                {
+                  chainId: `0x${targetChainId.toString(16)}`,
+                  chainName: network.name,
+                  rpcUrls: [network.rpcUrl],
+                  nativeCurrency: {
+                    name: network.currency,
+                    symbol: network.currency,
+                    decimals: 18,
+                  },
+                },
+              ],
+            })
+          } catch (addError) {
+            console.error("Error adding network:", addError)
+            toast({
+              title: "Network Error",
+              description: "Failed to add network to MetaMask",
+              variant: "destructive",
+            })
+          }
+        }
       } else {
-        toast({ title: "Error", description: "Failed to switch network", variant: "destructive" })
+        console.error("Error switching network:", error)
+        toast({
+          title: "Network Switch Failed",
+          description: "Failed to switch network",
+          variant: "destructive",
+        })
       }
     }
   }
 
-  const getBalance = async (address?: string, providerInstance?: ethers.BrowserProvider) => {
-    try {
-      const addr = address || account
-      const prov = providerInstance || provider
-
-      if (addr && prov) {
-        const balance = await prov.getBalance(addr)
-        setBalance(ethers.formatEther(balance))
-      }
-    } catch (error) {
-      console.error("Error getting balance:", error)
-    }
+  const value: WalletContextType = {
+    account,
+    balance,
+    chainId,
+    isConnected,
+    isConnecting,
+    signer,
+    provider,
+    connectWallet,
+    disconnectWallet,
+    switchNetwork,
+    refreshBalance,
   }
 
-  return (
-    <WalletContext.Provider
-      value={{
-        account,
-        balance,
-        isConnected,
-        provider,
-        signer,
-        chainId,
-        connectWallet,
-        disconnectWallet,
-        switchNetwork,
-        getBalance,
-      }}
-    >
-      {children}
-    </WalletContext.Provider>
-  )
+  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>
 }
